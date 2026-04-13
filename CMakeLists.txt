@@ -32,7 +32,7 @@ pkg_check_modules(GST REQUIRED
 )
 
 set(SOURCES
-    main.cpp
+    gstreamer.cpp
 )
 
 add_executable(GStreamer ${SOURCES})
