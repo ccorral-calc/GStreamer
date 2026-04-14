@@ -13,6 +13,7 @@
 class VideoRecorder
 {
 public:
+    int port_;
     VideoRecorder(int port, const std::string &filename)
         : port_(port), filename_(filename), keep_running_(true), data_flowing_(false)
     {
@@ -97,7 +98,6 @@ private:
         close(sockfd);
     }
 
-    int port_;
     std::string filename_;
     GstElement *pipeline_, *selector_, *app_src_;
     GstPad *primary_pad_, *fallback_pad_;
@@ -107,13 +107,10 @@ private:
 
 // Global for signal handler
 std::vector<VideoRecorder *> recorders;
-
+std::atomic<bool> _running = true;
 void handle_sigint(int)
 {
-    std::cout << "\n[SYSTEM] Shutting down all streams...\n";
-    for (auto r : recorders)
-        r->stop();
-    exit(0);
+    _running = false;
 }
 
 int main(int argc, char *argv[])
@@ -131,8 +128,17 @@ int main(int argc, char *argv[])
     }
 
     // Main thread stays alive
-    while (true)
+    while (_running)
         std::this_thread::sleep_for(std::chrono::seconds(1));
+
+    // Cleanup
+    std::cout << "\n[SYSTEM] Shutting down all streams...\n";
+    for (auto &r : recorders)
+    {
+        r->stop();
+        std::cout << "[INFO] Deleted recorder on port " << r->port_ << "\n";
+        delete r;
+    }
 
     return 0;
 }
