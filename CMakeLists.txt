@@ -30,18 +30,35 @@ pkg_check_modules(GST REQUIRED
     gstreamer-video-1.0 
     gstreamer-base-1.0
 )
-
-set(SOURCES
-    gstreamer.cpp
+# Find FFmpeg (Added this section)
+pkg_check_modules(FFMPEG REQUIRED 
+    libavformat 
+    libavcodec 
+    libavutil 
+    libswscale
 )
 
-add_executable(GStreamer ${SOURCES})
-target_include_directories(
-    GStreamer
-    PUBLIC ./include
-    ${GST_INCLUDE_DIRS}
+# Helper for GStreamer only targets
+function(setup_gst_target TARGET_NAME)
+    target_include_directories(${TARGET_NAME} PRIVATE ./include ${GST_INCLUDE_DIRS})
+    target_link_libraries(${TARGET_NAME} PRIVATE ${GST_LIBRARIES})
+endfunction()
+
+# --- Build Executable 1 & 2 ---
+add_executable(main main.cpp)
+setup_gst_target(main)
+
+add_executable(GStreamer_test gstreamer.cpp)
+setup_gst_target(GStreamer_test)
+
+# --- Build Executable 3: ffmpeg_api (Modified to include FFmpeg) ---
+add_executable(ffmpeg_api ffmpeg_API.cpp)
+target_include_directories(ffmpeg_api PRIVATE 
+    ./include 
+    ${GST_INCLUDE_DIRS} 
+    ${FFMPEG_INCLUDE_DIRS}
 )
-target_link_libraries(
-    GStreamer
-    PRIVATE ${GST_LIBRARIES}
+target_link_libraries(ffmpeg_api PRIVATE 
+    ${GST_LIBRARIES} 
+    ${FFMPEG_LIBRARIES}
 )
