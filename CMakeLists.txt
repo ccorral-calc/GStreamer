@@ -51,6 +51,9 @@ setup_gst_target(main)
 add_executable(GStreamer_test gstreamer.cpp)
 setup_gst_target(GStreamer_test)
 
+add_executable(GStreamer_no_encoder gstreamer_no_encoder.cpp)
+setup_gst_target(GStreamer_no_encoder)
+
 # --- Build Executable 3: ffmpeg_api (Modified to include FFmpeg) ---
 add_executable(ffmpeg_api ffmpeg_API.cpp)
 target_include_directories(ffmpeg_api PRIVATE 
