@@ -36,7 +36,7 @@ public:
         // Define elements
         std::string input_selector = "input-selector name=sel sync-streams=true sync-mode=1 ! h264parse config-interval=1 ! mpegtsmux ! filesink location=" + filename + " ";
         std::string branch_live = "appsrc name=mysrc format=time is-live=true ! tsdemux ! h264parse ! queue leaky=downstream ! sel.sink_0 ";
-        std::string branch_fallback_video = "multifilesrc location=black_720_2.ts loop=true ! tsdemux ! h264parse !  identity sync=true ! queue flush-on-eos=true leaky=downstream ! sel.sink_1";
+        std::string branch_fallback_video = "multifilesrc location=black_720.ts loop=true ! tsdemux ! h264parse !  identity sync=true ! queue flush-on-eos=true leaky=downstream ! sel.sink_1";
 
         std::string pipeline_desc = input_selector + branch_live + branch_fallback_video;
         GError *error = NULL;
@@ -238,7 +238,7 @@ int main(int argc, char *argv[])
     printf("Initializing %d recorders\n", cfg.num_recorders);
 
     // Initialize recorders
-    for (int i = 1; i <= cfg.num_recorders; ++i)
+    for (int i = 0; i < cfg.num_recorders; ++i)
     {
         int port = cfg.base_port + i;
         std::string file = "stream_" + std::to_string(port) + ".ts";
