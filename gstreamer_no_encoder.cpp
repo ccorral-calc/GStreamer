@@ -33,14 +33,12 @@ public:
             }
         }
 
-        // Define unique pipeline per instance
-        std::string pipeline_desc =
-            "input-selector name=sel ! queue ! mpegtsmux ! filesink location=" + filename + " "
-                                                                                            "appsrc name=mysrc caps=\"video/mpegts, systemstream=(boolean)true\" format=time is-live=true ! "
-                                                                                            "tsdemux ! h264parse ! queue ! sel.sink_0 "
-                                                                                            "videotestsrc pattern=black is-live=true ! video/x-raw,width=720,height=480,framerate=10/1 ! "
-                                                                                            "x264enc tune=zerolatency ! h264parse ! queue ! sel.sink_1";
+        // Define elements
+        std::string input_selector = "input-selector name=sel sync-streams=true sync-mode=1 ! h264parse config-interval=1 ! mpegtsmux ! filesink location=" + filename + " ";
+        std::string branch_live = "appsrc name=mysrc format=time is-live=true ! tsdemux ! h264parse ! queue leaky=downstream ! sel.sink_0 ";
+        std::string branch_fallback_video = "multifilesrc location=black_720_2.ts loop=true ! tsdemux ! h264parse !  identity sync=true ! queue flush-on-eos=true leaky=downstream ! sel.sink_1";
 
+        std::string pipeline_desc = input_selector + branch_live + branch_fallback_video;
         GError *error = NULL;
         pipeline_ = gst_parse_launch(pipeline_desc.c_str(), &error);
         if (error)
@@ -77,40 +75,40 @@ public:
 
     void stop()
     {
-        if (keep_running_.exchange(false))
+        //  Atomically ensure we only stop once
+        if (!keep_running_.exchange(false))
+            return;
+
+        // 3. Signal GStreamer to finish the file
+        if (app_src_)
         {
-            // 1. Force break the socket block if it's stuck in recvfrom
-            // We need to store sockfd as a member variable to do this
-            if (sockfd != -1)
-            {
-                shutdown(sockfd, SHUT_RDWR);
-            }
-
-            // 2. Stop the thread
-            if (worker_thread_.joinable())
-                worker_thread_.join();
-
-            // 3. Signal GStreamer to finish the file
-            if (app_src_)
-            {
-                gst_app_src_end_of_stream(GST_APP_SRC(app_src_));
-            }
-
-            // 4. Wait for EOS on the bus (with a hard timeout)
-            GstBus *bus = gst_element_get_bus(pipeline_);
-            gst_bus_timed_pop_filtered(bus, 100 * GST_MSECOND,
-                                       (GstMessageType)(GST_MESSAGE_EOS | GST_MESSAGE_ERROR));
-            gst_object_unref(bus);
-
-            // 5. Hard stop and cleanup
-            gst_element_set_state(pipeline_, GST_STATE_NULL);
-
-            gst_object_unref(selector_);
-            gst_object_unref(app_src_);
-            gst_object_unref(primary_pad_);
-            gst_object_unref(fallback_pad_);
-            gst_object_unref(pipeline_);
+            printf("Stopping the app_src\r\n");
+            gst_app_src_end_of_stream(GST_APP_SRC(app_src_));
         }
+
+        // Change state to NULL immediately.
+        // Do NOT wait for EOS on the bus; it won't come due to 'loop=true' fallback.
+        gst_element_set_state(pipeline_, GST_STATE_NULL);
+
+        // Stop the thread
+        if (worker_thread_.joinable())
+        {
+            printf("Stopping the Thread\r\n");
+            worker_thread_.join();
+        }
+
+        // 6. Cleanup refs (Null checks are important)
+        if (selector_)
+            gst_object_unref(selector_);
+        if (app_src_)
+            gst_object_unref(app_src_);
+        if (primary_pad_)
+            gst_object_unref(primary_pad_);
+        if (fallback_pad_)
+            gst_object_unref(fallback_pad_);
+        gst_object_unref(pipeline_);
+
+        pipeline_ = nullptr; // Prevent double cleanup
     }
 
     bool check_plugin(const std::string &name)
@@ -159,13 +157,13 @@ private:
         uint8_t buffer[2048];
         while (keep_running_)
         {
+
             ssize_t n = recvfrom(sockfd, buffer, sizeof(buffer), 0, NULL, NULL);
-            if (!keep_running_)
-                break; // Immediate exit check
             if (n > 0)
             {
                 if (!data_flowing_.exchange(true))
                 {
+                    // gst_pad_push_event(primary_pad_, gst_event_new_flush_stop(TRUE));
                     printf("[PORT %d] Incoming Data Detected -> Switching to Primary\n", port_);
                     g_object_set(selector_, "active-pad", primary_pad_, NULL);
                 }
@@ -183,11 +181,13 @@ private:
             {
                 if (data_flowing_.exchange(false))
                 {
+                    // gst_pad_push_event(primary_pad_, gst_event_new_flush_start());
                     printf("[PORT %d] Signal Lost -> Switching to Fallback\n", port_);
                     g_object_set(selector_, "active-pad", fallback_pad_, NULL);
                 }
             }
         }
+        keep_running_.store(false);
         close(sockfd);
         sockfd = -1;
     }
@@ -208,70 +208,58 @@ void handle_sigint(int)
     _running.store(false);
 }
 
+typedef struct Config
+{
+    int base_port;
+    int num_recorders;
+} Config;
+
+Config parse_args(int argc, char *argv[])
+{
+    Config cfg = {5000, 1}; // Default
+    for (int i = 1; i < argc; i++)
+    {
+        std::string arg = argv[i];
+        if (arg == "-n" && i + 1 < argc)
+            cfg.num_recorders = std::stoi(argv[++i]);
+        else if (arg == "-p" && i + 1 < argc)
+            cfg.base_port = std::stoi(argv[++i]);
+    }
+    return cfg;
+}
+
 int main(int argc, char *argv[])
 {
     gst_init(&argc, &argv); // Pass args to GStreamer
     signal(SIGINT, handle_sigint);
 
-    int num_recorders = 1;
-    int base_port = 5000;
+    Config cfg = parse_args(argc, argv);
 
-    // Parse args
-    for (int i = 1; i < argc; i++)
+    printf("Initializing %d recorders\n", cfg.num_recorders);
+
+    // Initialize recorders
+    for (int i = 1; i <= cfg.num_recorders; ++i)
     {
-        std::string arg = argv[i];
-        if (arg == "-n" && i + 1 < argc)
-        {
-            try
-            {
-                num_recorders = std::stoi(argv[++i]);
-            }
-            catch (const std::exception &e)
-            {
-                fprintf(stderr, "Invalid number after -n\n");
-                return 1;
-            }
-        }
-        // Handle starting port number
-        else if (arg == "-p" && i + 1 < argc)
-        {
-            try
-            {
-                base_port = std::stoi(argv[++i]);
-            }
-            catch (...)
-            {
-                fprintf(stderr, "Error: Invalid port for -p\n");
-                return 1;
-            }
-        }
-
-        printf("Initializing %d recorders\n", num_recorders);
-
-        // Initialize recorders
-        for (int i = 1; i <= num_recorders; ++i)
-        {
-            int port = 5000 + i;
-            std::string file = "stream_" + std::to_string(port) + ".ts";
-            recorders.push_back(new VideoRecorder(port, file));
-            std::cout << "[INFO] Started recorder on port " << port << " -> " << file << "\n";
-        }
-
-        // Keep main thread alive
-        while (_running.load())
-        {
-            std::this_thread::sleep_for(std::chrono::milliseconds(200));
-        }
-
-        // Cleanup
-        std::cout << "\n[SYSTEM] Shutting down all streams...\n";
-        for (auto r : recorders)
-        {
-            r->stop();
-            std::cout << "[INFO] Deleted recorder on port " << r->port_ << "\n";
-            delete r;
-        }
-
-        return 0;
+        int port = cfg.base_port + i;
+        std::string file = "stream_" + std::to_string(port) + ".ts";
+        recorders.push_back(new VideoRecorder(port, file));
+        std::cout << "[INFO] Started recorder on port " << port << " -> " << file << "\n";
     }
+
+    // Keep main thread alive
+    while (_running.load())
+    {
+        std::this_thread::sleep_for(std::chrono::milliseconds(200));
+    }
+
+    // Cleanup
+    std::cout << "\n[SYSTEM] Shutting down all streams...\n";
+    for (auto r : recorders)
+    {
+        r->stop();
+        std::cout << "[INFO] Deleted recorder on port " << r->port_ << "\n";
+        delete r;
+    }
+
+    return 0;
 }
