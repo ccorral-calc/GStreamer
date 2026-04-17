@@ -210,30 +210,68 @@ void handle_sigint(int)
 
 int main(int argc, char *argv[])
 {
-    gst_init(&argc, &argv);
+    gst_init(&argc, &argv); // Pass args to GStreamer
     signal(SIGINT, handle_sigint);
 
-    // Initialize 9 recorders on ports 5001-5009
-    for (int i = 1; i <= 9; ++i)
+    int num_recorders = 1;
+    int base_port = 5000;
+
+    // Parse args
+    for (int i = 1; i < argc; i++)
     {
-        int port = 5000 + i;
-        std::string file = "stream_" + std::to_string(port) + ".ts";
-        recorders.push_back(new VideoRecorder(port, file));
-        std::cout << "[INFO] Started recorder on port " << port << " -> " << file << "\n";
+        std::string arg = argv[i];
+        if (arg == "-n" && i + 1 < argc)
+        {
+            try
+            {
+                num_recorders = std::stoi(argv[++i]);
+            }
+            catch (const std::exception &e)
+            {
+                fprintf(stderr, "Invalid number after -n\n");
+                return 1;
+            }
+        }
+        // Handle starting port number
+        else if (arg == "-p" && i + 1 < argc)
+        {
+            try
+            {
+                base_port = std::stoi(argv[++i]);
+            }
+            catch (...)
+            {
+                fprintf(stderr, "Error: Invalid port for -p\n");
+                return 1;
+            }
+        }
+
+        printf("Initializing %d recorders\n", num_recorders);
+
+        // Initialize recorders
+        for (int i = 1; i <= num_recorders; ++i)
+        {
+            int port = 5000 + i;
+            std::string file = "stream_" + std::to_string(port) + ".ts";
+            recorders.push_back(new VideoRecorder(port, file));
+            std::cout << "[INFO] Started recorder on port " << port << " -> " << file << "\n";
+        }
+
+        // Keep main thread alive
+        while (_running.load())
+        {
+            std::this_thread::sleep_for(std::chrono::milliseconds(200));
+        }
+
+        // Cleanup
+        std::cout << "\n[SYSTEM] Shutting down all streams...\n";
+        for (auto r : recorders)
+        {
+            r->stop();
+            std::cout << "[INFO] Deleted recorder on port " << r->port_ << "\n";
+            delete r;
+        }
+
+        return 0;
     }
-
-    // Main thread stays alive
-    while (_running.load())
-        std::this_thread::sleep_for(std::chrono::seconds(1));
-
-    // Cleanup
-    std::cout << "\n[SYSTEM] Shutting down all streams...\n";
-    for (auto r : recorders)
-    {
-        r->stop();
-        std::cout << "[INFO] Deleted recorder on port " << r->port_ << "\n";
-        delete r;
-    }
-
-    return 0;
 }
