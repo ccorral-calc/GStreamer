@@ -20,7 +20,7 @@ public:
 
         // Define unique pipeline per instance
         std::string pipeline_desc =
-            "input-selector name=sel sync-streams=false ! mpegtsmux alignment=1 ! filesink location=" + filename_ + " "
+            "input-selector name=sel sync-streams=false ! mpegtsmux alignment=1 ! filesink location=" + filename_ + " async=false "
                                                                                                                     "appsrc name=mysrc format=time is-live=true do-timestamp=true ! tsdemux ! h264parse ! sel.sink_0 "
                                                                                                                     "videotestsrc pattern=snow is-live=true ! video/x-raw,width=720,height=480,framerate=30/1 ! x264enc tune=zerolatency ! h264parse ! sel.sink_1";
 
@@ -38,24 +38,34 @@ public:
         worker_thread_ = std::thread(&VideoRecorder::socket_worker, this);
     }
 
-    ~VideoRecorder()
-    {
-        stop();
-    }
-
     void stop()
     {
-        if (keep_running_)
+        if (!keep_running_.exchange(false))
         {
-            keep_running_ = false;
-            if (worker_thread_.joinable())
-                worker_thread_.join();
-            gst_element_send_event(pipeline_, gst_event_new_eos());
-            // Wait a moment for EOS to propagate before NULL state
-            std::this_thread::sleep_for(std::chrono::milliseconds(500));
-            gst_element_set_state(pipeline_, GST_STATE_NULL);
-            gst_object_unref(pipeline_);
+            return;
         }
+        if (app_src_)
+        {
+            gst_app_src_end_of_stream(GST_APP_SRC(app_src_));
+        }
+
+        gst_element_send_event(pipeline_, gst_event_new_eos());
+        gst_element_set_state(pipeline_, GST_STATE_NULL);
+
+        if (worker_thread_.joinable())
+            worker_thread_.join();
+
+        if (selector_)
+            gst_object_unref(selector_);
+        if (app_src_)
+            gst_object_unref(app_src_);
+        if (primary_pad_)
+            gst_object_unref(primary_pad_);
+        if (fallback_pad_)
+            gst_object_unref(fallback_pad_);
+        gst_object_unref(pipeline_);
+
+        pipeline_ = nullptr; // Prevent double cleanup
     }
 
 private:
@@ -79,11 +89,17 @@ private:
             {
                 if (!data_flowing_.exchange(true))
                 {
+                    printf("Live Video\r\n");
                     g_object_set(selector_, "active-pad", primary_pad_, NULL);
                 }
                 GstBuffer *gst_buf = gst_buffer_new_allocate(NULL, n, NULL);
                 gst_buffer_fill(gst_buf, 0, buffer, n);
-                GstFlowReturn ret;
+                GstStateChangeReturn ret = gst_element_set_state(pipeline_, GST_STATE_PLAYING);
+                if (ret == GST_STATE_CHANGE_FAILURE)
+                {
+                    g_printerr("Failed to start pipeline!\n");
+                }
+
                 g_signal_emit_by_name(app_src_, "push-buffer", gst_buf, &ret);
                 gst_buffer_unref(gst_buf);
             }
@@ -91,7 +107,13 @@ private:
             {
                 if (data_flowing_.exchange(false))
                 {
+                    printf("Signal Loss...\r\n");
                     g_object_set(selector_, "active-pad", fallback_pad_, NULL);
+                }
+                GstStateChangeReturn ret = gst_element_set_state(pipeline_, GST_STATE_PLAYING);
+                if (ret == GST_STATE_CHANGE_FAILURE)
+                {
+                    g_printerr("Failed to start pipeline!\n");
                 }
             }
         }
@@ -133,7 +155,7 @@ int main(int argc, char *argv[])
 
     // Cleanup
     std::cout << "\n[SYSTEM] Shutting down all streams...\n";
-    for (auto &r : recorders)
+    for (auto r : recorders)
     {
         r->stop();
         std::cout << "[INFO] Deleted recorder on port " << r->port_ << "\n";
