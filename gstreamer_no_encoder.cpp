@@ -9,7 +9,7 @@
 #include <unistd.h>
 #include <csignal>
 #include <string>
-#include <cstring> // For strerror
+#include <cstring>
 
 class VideoRecorder
 {
@@ -21,7 +21,7 @@ public:
 
         // List all critical elements your pipeline_desc uses
         std::vector<std::string> required_elements = {
-            "mpegtsmux", "input-selector", "tsdemux", "h264parse", "x264enc"};
+            "mpegtsmux", "input-selector", "tsdemux", "h264parse"};
 
         for (const auto &el : required_elements)
         {
@@ -34,8 +34,8 @@ public:
         }
 
         // Define elements
-        std::string input_selector = "input-selector name=sel sync-streams=true sync-mode=1 ! h264parse config-interval=1 ! mpegtsmux ! filesink location=" + filename + " ";
-        std::string branch_live = "appsrc name=mysrc format=time is-live=true ! tsdemux ! h264parse ! queue leaky=downstream ! sel.sink_0 ";
+        std::string input_selector = "input-selector name=sel sync-streams=true sync-mode=clock cache-buffers=true ! h264parse config-interval=1 ! mpegtsmux ! filesink location=" + filename + " ";
+        std::string branch_live = "appsrc name=mysrc format=time is-live=true do-timestamp=true ! tsdemux ! h264parse ! queue leaky=downstream ! sel.sink_0 ";
         std::string branch_fallback_video = "multifilesrc location=black_720.ts loop=true ! tsdemux ! h264parse !  identity sync=true ! queue flush-on-eos=true leaky=downstream ! sel.sink_1";
 
         std::string pipeline_desc = input_selector + branch_live + branch_fallback_video;
@@ -54,9 +54,29 @@ public:
             fprintf(stderr, "[PORT %d] Failed to find internal elements\n", port);
             return;
         }
+        GstCaps *caps = gst_caps_from_string("video/mpegts, systemstream=(boolean)true");
+        g_object_set(app_src_, "caps", caps, NULL);
+        gst_caps_unref(caps);
 
         primary_pad_ = gst_element_get_static_pad(selector_, "sink_0");
+        gst_pad_add_probe(primary_pad_, GST_PAD_PROBE_TYPE_EVENT_BOTH, [](GstPad *pad, GstPadProbeInfo *info, gpointer user_data) -> GstPadProbeReturn
+                          {
+        GstEvent *event = GST_PAD_PROBE_INFO_EVENT(info);
+        if(event->type != GstEventType::GST_EVENT_TAG)
+        {
+            printf("Event on Primary Pad: %s\n", GST_EVENT_TYPE_NAME(event));
+        }
+        return GST_PAD_PROBE_OK; }, NULL, NULL);
+
         fallback_pad_ = gst_element_get_static_pad(selector_, "sink_1");
+        gst_pad_add_probe(fallback_pad_, GST_PAD_PROBE_TYPE_EVENT_BOTH, [](GstPad *pad, GstPadProbeInfo *info, gpointer user_data) -> GstPadProbeReturn
+                          {
+        GstEvent *event = GST_PAD_PROBE_INFO_EVENT(info);
+        if(event->type != GstEventType::GST_EVENT_TAG)
+        {
+            printf("Event on Fallback Pad: %s\n", GST_EVENT_TYPE_NAME(event));
+        }
+        return GST_PAD_PROBE_OK; }, NULL, NULL);
 
         // Start on fallback
         g_object_set(selector_, "active-pad", fallback_pad_, NULL);
@@ -68,36 +88,55 @@ public:
             return;
         }
 
-        worker_thread_ = std::thread(&VideoRecorder::socket_worker, this);
+        // Setup the BUS to read msg in pipeline status
+        //     GstBus *bus = gst_element_get_bus(pipeline_);
+        //     gst_bus_add_watch(bus, [](GstBus *bus, GstMessage *msg, gpointer data) -> gboolean
+        //                       {
+        // switch (GST_MESSAGE_TYPE(msg)) {
+        //     case GST_MESSAGE_ERROR: {
+        //         GError *err; gchar *debug;
+        //         gst_message_parse_error(msg, &err, &debug);
+        //         printf("Error: %s\n", err->message);
+        //         g_error_free(err); g_free(debug);
+        //         break;
+        //     }
+        //     case GST_MESSAGE_EOS:
+        //         printf("End of Stream reached\n");
+        //         break;
+        //     case GST_MESSAGE_ELEMENT:
+        //         // High-level element signals show up here
+        //         printf("Element message: %s\n", gst_structure_get_name(gst_message_get_structure(msg)));
+        //         break;
+        //     default:
+        //         break;
+        // }
+        // return TRUE; }, this);
+        //     gst_object_unref(bus);
+
+        //     worker_thread_ = std::thread(&VideoRecorder::socket_worker, this);
     }
 
     ~VideoRecorder() = default;
 
     void stop()
     {
-        //  Atomically ensure we only stop once
         if (!keep_running_.exchange(false))
             return;
 
-        // 3. Signal GStreamer to finish the file
         if (app_src_)
         {
-            printf("Stopping the app_src\r\n");
             gst_app_src_end_of_stream(GST_APP_SRC(app_src_));
         }
 
-        // Change state to NULL immediately.
-        // Do NOT wait for EOS on the bus; it won't come due to 'loop=true' fallback.
+        gst_element_send_event(pipeline_, gst_event_new_eos());
         gst_element_set_state(pipeline_, GST_STATE_NULL);
 
         // Stop the thread
         if (worker_thread_.joinable())
         {
-            printf("Stopping the Thread\r\n");
             worker_thread_.join();
         }
 
-        // 6. Cleanup refs (Null checks are important)
         if (selector_)
             gst_object_unref(selector_);
         if (app_src_)
@@ -125,8 +164,7 @@ public:
     }
 
 private:
-    void
-    socket_worker()
+    void socket_worker()
     {
         sockfd = socket(AF_INET, SOCK_DGRAM, 0);
         if (sockfd < 0)
@@ -161,13 +199,13 @@ private:
             ssize_t n = recvfrom(sockfd, buffer, sizeof(buffer), 0, NULL, NULL);
             if (n > 0)
             {
+                GstBuffer *gst_buf = gst_buffer_new_allocate(NULL, n, NULL);
                 if (!data_flowing_.exchange(true))
                 {
-                    // gst_pad_push_event(primary_pad_, gst_event_new_flush_stop(TRUE));
-                    printf("[PORT %d] Incoming Data Detected -> Switching to Primary\n", port_);
+                    printf("[PORT %d] Recording Video\n", port_);
                     g_object_set(selector_, "active-pad", primary_pad_, NULL);
                 }
-                GstBuffer *gst_buf = gst_buffer_new_allocate(NULL, n, NULL);
+
                 gst_buffer_fill(gst_buf, 0, buffer, n);
                 GstFlowReturn ret;
                 g_signal_emit_by_name(app_src_, "push-buffer", gst_buf, &ret);
@@ -181,8 +219,7 @@ private:
             {
                 if (data_flowing_.exchange(false))
                 {
-                    // gst_pad_push_event(primary_pad_, gst_event_new_flush_start());
-                    printf("[PORT %d] Signal Lost -> Switching to Fallback\n", port_);
+                    printf("[PORT %d] Video Signal Lost...\n", port_);
                     g_object_set(selector_, "active-pad", fallback_pad_, NULL);
                 }
             }
@@ -230,6 +267,10 @@ Config parse_args(int argc, char *argv[])
 
 int main(int argc, char *argv[])
 {
+    setenv("GST_DEBUG", "input-selector:5,mpegtsmux:5", 1);
+    setenv("GST_DEBUG_FILE", "gstreamer_debug.txt", 1);
+    setenv("GST_DEBUG_NO_COLOR", "1", 1);
+
     gst_init(&argc, &argv); // Pass args to GStreamer
     signal(SIGINT, handle_sigint);
 
