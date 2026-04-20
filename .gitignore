@@ -1,4 +1,5 @@
 *.mp4
 *.ts
+!black_720.ts
 *.txt
 build/*
