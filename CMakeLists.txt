@@ -47,6 +47,9 @@ setup_gst_target(GStreamer_test)
 add_executable(GStreamer_no_encoder gstreamer_no_encoder.cpp)
 setup_gst_target(GStreamer_no_encoder)
 
+add_executable(GStreamer_appsink gstreamer_appsink.cpp)
+setup_gst_target(GStreamer_appsink)
+
 # --- FFmpeg API Executable ---
 add_executable(ffmpeg_api ffmpeg_API.cpp)
 target_include_directories(ffmpeg_api PRIVATE 
